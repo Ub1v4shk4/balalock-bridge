@@ -209,7 +209,7 @@
             if (typeof row.matches_played !== 'number' || row.matches_played < 5) {
                 out.personal.reason = 'small-history'; return out;
             }
-            if (typeof row.last_played !== 'number' || row.last_played > request.to ||
+            if (typeof row.last_played !== 'number' || row.last_played > request.to || row.last_played < request.from ||
                 typeof row.account_id !== 'number' || row.account_id !== request.accountId) { return out; }
             var values = {}, keys = ['networth_per_min', 'damage_per_min', 'deaths_per_min', 'assists_per_min'];
             for (var k = 0; k < keys.length; k++) {

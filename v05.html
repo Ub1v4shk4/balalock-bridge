@@ -1,0 +1,322 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Balagan Eye bridge 05</title></head><body><p>Balagan Eye: загрузчик публичной статистики матча.</p><script>(function bridgePage(project, projectBaseline, projectPersonal, projectLobby, requestLobby) {
+        var requestId = '', chunks = [], xhr = null, lastRaw = null, lastCommand = '';
+        function emit(kind, index, data) {
+            document.title = 'PM2|' + requestId + '|' + kind + '|' + index + '|' + data;
+        }
+        function deliver(result) {
+            var text = JSON.stringify(result);
+            if (text.length > 240000) { emit('error', 0, 'metadata-too-large'); return; }
+            chunks = [];
+            for (var offset = 0; offset < text.length; offset += 2800) { chunks.push(text.substr(offset, 2800)); }
+            emit('count', 0, String(chunks.length));
+        }
+        window.pmFetch = function (id, seq) {
+            if (xhr) { xhr.abort(); }
+            requestId = String(seq); chunks = [];
+            xhr = new XMLHttpRequest();
+            xhr.open('GET', 'https://api.deadlock-api.com/v1/matches/' + id + '/metadata?disable_steam=true', true);
+            xhr.timeout = 20000;
+            var active = xhr, activeId = requestId;
+            xhr.onload = function () {
+                if (xhr !== active || requestId !== activeId) { return; }
+                if (xhr.status !== 200) { emit('error', 0, 'http-' + xhr.status); return; }
+                try {
+                    lastRaw = JSON.parse(xhr.responseText);
+                    var compact = project(lastRaw);
+                    if (compact.matchId !== String(id)) { throw new Error('different-match'); }
+                    deliver(compact);
+                } catch (e) { emit('error', 0, 'invalid-metadata'); }
+            };
+            xhr.onerror = function () { if (xhr === active && requestId === activeId) { emit('error', 0, 'network'); } };
+            xhr.ontimeout = function () { if (xhr === active && requestId === activeId) { emit('error', 0, 'timeout'); } };
+            xhr.send();
+        };
+        window.pmPull = function (seq, index) {
+            if (String(seq) === requestId && index >= 0 && index < chunks.length) { emit('chunk', index, chunks[index]); }
+        };
+        window.pmRank = function (request, seq) {
+            if (xhr) { xhr.abort(); }
+            requestId = String(seq); chunks = [];
+            var activeId = requestId;
+            function fail(error) { if (requestId === activeId) { emit('error', 0, error); } }
+            function get(path, success) {
+                xhr = new XMLHttpRequest();
+                xhr.open('GET', 'https://api.deadlock-api.com' + path, true); xhr.timeout = 20000;
+                var active = xhr;
+                xhr.onload = function () {
+                    if (requestId !== activeId || xhr !== active) { return; }
+                    if (active.status !== 200) { fail('http-' + active.status); return; }
+                    try { success(JSON.parse(active.responseText)); } catch (e) { fail('invalid-metadata'); }
+                };
+                xhr.onerror = function () { fail('network'); }; xhr.ontimeout = function () { fail('timeout'); }; xhr.send();
+            }
+            function cohort(rank) {
+                var tier = Math.floor(rank.badge / 10);
+                if (!tier || tier > 11) { deliver(projectBaseline(request, null, null, null)); return; }
+                var query = '?game_mode=normal&match_mode=ranked&min_average_badge=' + (tier * 10 + 1) +
+                    '&max_average_badge=' + (tier * 10 + 6) + '&min_duration_s=' + request.minDuration +
+                    '&max_duration_s=' + request.maxDuration + '&min_unix_timestamp=' + request.from + '&max_unix_timestamp=' + request.to;
+                get('/v1/analytics/player-stats/metrics' + query + '&hero_ids=' + request.heroId, function (metrics) {
+                    get('/v1/analytics/hero-stats' + query + '&bucket=no_bucket', function (heroes) {
+                        deliver(projectBaseline(request, rank, metrics, heroes));
+                    });
+                });
+            }
+            function identify(raw) {
+                var info = raw && (raw.match_info || raw), found = null, count = 0;
+                if (!info || String(info.match_id) !== String(request.matchId)) { fail('different-match'); return; }
+                for (var i = 0; i < info.players.length; i++) {
+                    var p = info.players[i];
+                    if (p.hero_id === request.heroId && p.team + 1 === request.team && p.kills === request.kills &&
+                        p.deaths === request.deaths && p.assists === request.assists && p.net_worth === request.souls) { found = p; count++; }
+                }
+                if (count !== 1) { fail('ambiguous-player'); return; }
+                if (request.badge >= 11 && request.badge <= 116) { cohort({badge:request.badge,source:'match'}); }
+                else if (found.account_id > 0) {
+                    get('/v1/players/' + found.account_id + '/rank', function (rank) {
+                        cohort({badge:rank.badge || 0,source:'latest-ranked',lastMatchId:rank.last_match ? String(rank.last_match.match_id) : null});
+                    });
+                } else { deliver(projectBaseline(request, null, null, null)); }
+            }
+            var cached = lastRaw && (lastRaw.match_info || lastRaw);
+            if (cached && String(cached.match_id) === String(request.matchId)) { identify(lastRaw); }
+            else { get('/v1/matches/' + request.matchId + '/metadata?disable_steam=true', identify); }
+        };
+        window.pmPersonal = function (request, seq) {
+            if (xhr) { xhr.abort(); }
+            requestId = String(seq); chunks = [];
+            var activeId = requestId;
+            function get(path, success) {
+                xhr = new XMLHttpRequest(); xhr.open('GET', 'https://api.deadlock-api.com' + path, true); xhr.timeout = 20000;
+                var active = xhr;
+                xhr.onload = function () {
+                    if (requestId !== activeId || xhr !== active) { return; }
+                    if (active.status !== 200) { emit('error',0,'http-' + active.status); return; }
+                    try { success(JSON.parse(active.responseText)); } catch (e) { emit('error',0,'invalid-metadata'); }
+                };
+                xhr.onerror = function () { if (xhr === active && requestId === activeId) { emit('error',0,'network'); } };
+                xhr.ontimeout = function () { if (xhr === active && requestId === activeId) { emit('error',0,'timeout'); } };
+                xhr.send();
+            }
+            function identify(raw) {
+                var info = raw && (raw.match_info || raw), found = null, count = 0;
+                if (!info || String(info.match_id) !== String(request.matchId)) { emit('error',0,'different-match'); return; }
+                for (var i = 0; i < info.players.length; i++) {
+                    var row = info.players[i];
+                    if (row.hero_id === request.heroId && row.team + 1 === request.team && row.kills === request.kills &&
+                        row.deaths === request.deaths && row.assists === request.assists && row.net_worth === request.souls) { found = row; count++; }
+                }
+                if (count !== 1 || !(found.account_id > 0)) { emit('error',0,'ambiguous-player'); return; }
+                request.accountId = found.account_id;
+                var query = '?account_ids=' + found.account_id + '&hero_ids=' + request.heroId + '&game_mode=normal&match_mode=ranked,unranked' +
+                    '&min_duration_s=' + request.minDuration + '&max_duration_s=' + request.maxDuration +
+                    '&min_unix_timestamp=' + request.from + '&max_unix_timestamp=' + request.to;
+                get('/v1/players/hero-stats' + query, function (rows) { deliver(projectPersonal(request, rows)); });
+            }
+            var cached = lastRaw && (lastRaw.match_info || lastRaw);
+            if (cached && String(cached.match_id) === String(request.matchId)) { identify(lastRaw); }
+            else { get('/v1/matches/' + request.matchId + '/metadata?disable_steam=true', identify); }
+        };
+        window.pmLobby = function (request,seq) {
+            if (xhr) { xhr.abort(); } requestId = String(seq); chunks = [];
+            var activeId = requestId;
+            function get(path,success,failure) {
+                if (requestId !== activeId) { return; }
+                xhr = new XMLHttpRequest(); var active = xhr;
+                xhr.open('GET','https://api.deadlock-api.com' + path,true); xhr.timeout = 5000;
+                function fail() { if (requestId === activeId && xhr === active) { failure(); } }
+                xhr.onload = function () {
+                    if (requestId !== activeId || xhr !== active) { return; }
+                    if (active.status !== 200) { fail(); return; }
+                    var body; try { body = JSON.parse(active.responseText); } catch (e) { fail(); return; }
+                    success(body);
+                };
+                xhr.onerror = fail; xhr.ontimeout = fail; xhr.send();
+            }
+            function identify(raw) { requestLobby(request,raw,get,projectLobby,function (result) { if (requestId === activeId) { deliver(result); } }); }
+            var cached = lastRaw && (lastRaw.match_info || lastRaw);
+            if (cached && String(cached.match_id) === String(request.matchId)) { identify(lastRaw); }
+            else { get('/v1/matches/' + request.matchId + '/metadata?disable_steam=true',identify,function () { emit('error',0,'network'); }); }
+        };
+        window.onhashchange = function () {
+            try {
+                if (window.location.hash.indexOf('#pm2=') !== 0) { return; }
+                if (window.location.hash === lastCommand) { return; }
+                lastCommand = window.location.hash;
+                var command = JSON.parse(decodeURIComponent(window.location.hash.substr(5)));
+                if (typeof command.seq !== 'number' || command.seq < 1 || command.seq !== Math.floor(command.seq)) { return; }
+                if (command.op === 'pull') { window.pmPull(command.seq, command.index); }
+                else if (command.op === 'metadata' && /^\d+$/.test(String(command.matchId))) { window.pmFetch(command.matchId, command.seq); }
+                else if (command.op === 'rank' && command.request && /^\d+$/.test(String(command.request.matchId))) { window.pmRank(command.request, command.seq); }
+                else if (command.op === 'personal' && command.request && /^\d+$/.test(String(command.request.matchId))) { window.pmPersonal(command.request, command.seq); }
+                else if (command.op === 'lobby' && command.request && /^\d+$/.test(String(command.request.matchId))) { window.pmLobby(command.request, command.seq); }
+            } catch (e) { emit('error', 0, 'invalid-command'); }
+        };
+        document.title = 'PM2|0|ready|0|ok';
+        window.onhashchange();
+    })(function project(raw) {
+        function number(v) { return typeof v === 'number' && isFinite(v) && v >= 0 ? v : null; }
+        function sample(s) {
+            return { time: number(s.time_stamp_s), souls: number(s.net_worth),
+                kills: number(s.kills), deaths: number(s.deaths), assists: number(s.assists),
+                lastHits: number(s.creep_kills), denies: number(s.denies),
+                heroDamage: number(s.player_damage), objectiveDamage: number(s.boss_damage) };
+        }
+        var info = raw && (raw.match_info || raw);
+        if (!info || !info.players || !info.players.length) { throw new Error('empty-metadata'); }
+        var result = { matchId: String(info.match_id), durationSeconds: number(info.duration_s),
+            gameMode: number(info.game_mode), matchMode: number(info.match_mode), startTime: number(info.start_time), players: [] };
+        for (var i = 0; i < info.players.length; i++) {
+            var p = info.players[i], stats = p.stats || [], last = null, timeline = [];
+            for (var s = 0; s < stats.length; s++) {
+                if (number(stats[s].time_stamp_s) === null) { continue; }
+                timeline.push(sample(stats[s]));
+                if (!last || stats[s].time_stamp_s > last.time_stamp_s) { last = stats[s]; }
+            }
+            // A periodic snapshot before the end is not a final damage total.
+            if (!last || result.durationSeconds === null || last.time_stamp_s < result.durationSeconds) { last = {}; }
+            var dead = p.death_details || [], deadSeconds = dead.length ? 0 : (p.deaths === 0 ? 0 : null);
+            for (var d = 0; d < dead.length; d++) {
+                if (number(dead[d].death_duration_s) === null) { deadSeconds = null; break; }
+                deadSeconds += dead[d].death_duration_s;
+            }
+            if (dead.length !== p.deaths) { deadSeconds = null; }
+            result.players.push({ heroId: number(p.hero_id),
+                rankBadge: p.player_rank_data ? number(p.player_rank_data.initial_display_rank) : null,
+                team: p.team === 0 ? 1 : (p.team === 1 ? 2 : null),
+                winning: info.winning_team === 0 || info.winning_team === 1 ? p.team === info.winning_team : null,
+                laneId: number(p.assigned_lane),
+                kills: number(p.kills), deaths: number(p.deaths), assists: number(p.assists),
+                souls: number(p.net_worth), lastHits: number(p.last_hits), denies: number(p.denies),
+                heroDamage: number(last.player_damage), objectiveDamage: number(last.boss_damage),
+                healing: number(last.player_healing), damageTaken: number(last.player_damage_taken),
+                allyHealing: number(last.teammate_healing), selfHealing: number(last.self_healing),
+                shotsHit: number(last.shots_hit), shotsMissed: number(last.shots_missed),
+                heroHits: number(last.hero_bullets_hit), critHits: number(last.hero_bullets_hit_crit),
+                damageMitigated: number(last.damage_mitigated), deadSeconds: deadSeconds,
+                timeline: timeline });
+        }
+        return result;
+    },function projectBaseline(request, rank, metrics, heroes) {
+        var out = { matchId: String(request.matchId), baseline: { available: false, reason: 'no-rank' } };
+        var badge = rank && rank.badge, tier = typeof badge === 'number' ? Math.floor(badge / 10) : 0;
+        if (tier < 1 || tier > 11) { return out; }
+        var matches = null;
+        for (var h = 0; heroes && h < heroes.length; h++) {
+            if (heroes[h].hero_id === request.heroId) { matches = heroes[h].matches; break; }
+        }
+        var chosen = {}, keys = ['net_worth_per_min', 'player_damage_per_min', 'deaths', 'kda', 'last_hits', 'denies'];
+        for (var k = 0; k < keys.length; k++) {
+            var source = metrics && metrics[keys[k]];
+            if (!source) { continue; }
+            var q = {}, names = ['percentile25', 'percentile50', 'percentile75'];
+            for (var n = 0; n < names.length; n++) {
+                var value = source[names[n]];
+                if (typeof value === 'number' && isFinite(value) && value >= 0) { q[names[n]] = value; }
+            }
+            if (q.percentile25 !== undefined && q.percentile50 !== undefined && q.percentile75 !== undefined &&
+                q.percentile25 <= q.percentile50 && q.percentile50 <= q.percentile75) { chosen[keys[k]] = q; }
+        }
+        out.baseline = { available: true, badge: badge, tier: tier, rankSource: rank.source,
+            rankMatchId: rank.lastMatchId || null, heroId: request.heroId,
+            matches: typeof matches === 'number' && isFinite(matches) ? matches : null,
+            minDuration: request.minDuration, maxDuration: request.maxDuration,
+            from: request.from, to: request.to, metrics: chosen };
+        return out;
+    },function projectPersonal(request, rows) {
+        var out = { matchId: String(request.matchId), personal: { available: false, reason: 'no-history' } };
+        for (var i = 0; rows && i < rows.length; i++) {
+            var row = rows[i];
+            if (row.hero_id !== request.heroId) { continue; }
+            if (typeof row.matches_played !== 'number' || row.matches_played < 5) {
+                out.personal.reason = 'small-history'; return out;
+            }
+            if (typeof row.last_played !== 'number' || row.last_played > request.to || row.last_played < request.from ||
+                typeof row.account_id !== 'number' || row.account_id !== request.accountId) { return out; }
+            var values = {}, keys = ['networth_per_min', 'damage_per_min', 'deaths_per_min', 'assists_per_min'];
+            for (var k = 0; k < keys.length; k++) {
+                var v = row[keys[k]];
+                if (typeof v === 'number' && isFinite(v) && v >= 0) { values[keys[k]] = v; }
+            }
+            out.personal = { available: true, heroId: request.heroId, matches: row.matches_played,
+                from: request.from, to: request.to, minDuration: request.minDuration, maxDuration: request.maxDuration, values: values };
+            return out;
+        }
+        return out;
+    },function projectLobby(request, rankRows, heroRows) {
+        function validBadge(badge) {
+            var tier = Math.floor(badge / 10), sub = badge % 10;
+            return typeof badge === 'number' && isFinite(badge) && tier >= 1 && tier <= 11 && sub >= 1 && sub <= 6 && sub === Math.floor(sub);
+        }
+        var out = { matchId:String(request.matchId), lobby:{available:false,reason:'no-ranks',total:request.players.length} };
+        var ordinal = 0, count = 0;
+        for (var i = 0; rankRows && i < rankRows.length; i++) {
+            var badge = rankRows[i].badge;
+            if (validBadge(badge)) { ordinal += (Math.floor(badge / 10) - 1) * 6 + badge % 10; count++; }
+        }
+        if (count) {
+            var position = Math.round(ordinal / count);
+            out.lobby = {available:true,source:'public-ranks',badge:(Math.floor((position - 1) / 6) + 1) * 10 + (position - 1) % 6 + 1,
+                rated:count,total:request.players.length}; return out;
+        }
+        if (request.gameMode !== 1) { out.lobby.reason = 'game-mode'; return out; }
+        var grouped = {}, keys = ['souls','heroDamage','lastHits'], totals = ['total_net_worth','total_player_damage','total_last_hits'];
+        for (var h = 0; heroRows && h < heroRows.length; h++) {
+            var row = heroRows[h];
+            if (!validBadge(row.bucket) || !(row.matches > 0)) { continue; }
+            var tier = Math.floor(row.bucket / 10), id = tier + ':' + row.hero_id;
+            if (!grouped[id]) { grouped[id] = {matches:0,values:[0,0,0]}; }
+            var complete = true;
+            for (var k = 0; k < totals.length; k++) { if (typeof row[totals[k]] !== 'number' || !isFinite(row[totals[k]]) || row[totals[k]] < 0) { complete = false; } }
+            if (!complete) { continue; }
+            grouped[id].matches += row.matches;
+            for (var m = 0; m < totals.length; m++) { grouped[id].values[m] += row[totals[m]]; }
+        }
+        var candidates = [];
+        for (var candidate = 1; candidate <= 11; candidate++) {
+            var squared = 0, players = 0, minimum = null;
+            for (var p = 0; p < request.players.length; p++) {
+                var player = request.players[p], cohort = grouped[candidate + ':' + player.heroId];
+                if (!cohort || cohort.matches < 200) { continue; }
+                var usable = true, score = 0;
+                for (var metric = 0; metric < keys.length; metric++) {
+                    var actual = player[keys[metric]], usual = cohort.values[metric] / cohort.matches;
+                    if (typeof actual !== 'number' || !isFinite(actual) || actual <= 0 || usual <= 0) { usable = false; break; }
+                    var distance = Math.log(actual / usual); score += distance * distance;
+                }
+                if (usable) { squared += score; players++; minimum = minimum === null ? cohort.matches : Math.min(minimum,cohort.matches); }
+            }
+            // Keep the entire composition identical across candidates. Partial fits
+            // would let a hero missing in one tier bias the estimate toward another.
+            if (players === request.players.length && players >= 8) { candidates.push({tier:candidate,score:Math.sqrt(squared / (players * 3)),matches:minimum}); }
+        }
+        candidates.sort(function (a,b) { return a.score - b.score; });
+        if (candidates.length < 3) { out.lobby.reason = 'small-sample'; return out; }
+        var best = candidates[0], lower = best.tier, upper = best.tier;
+        if (best.score > 0.35) { out.lobby.reason = 'poor-fit'; return out; }
+        for (var c = 1; c < candidates.length; c++) {
+            if (candidates[c].score <= best.score + 0.03) { lower = Math.min(lower,candidates[c].tier); upper = Math.max(upper,candidates[c].tier); }
+        }
+        if (upper - lower > 2) { out.lobby.reason = 'ambiguous'; return out; }
+        out.lobby = {available:true,source:'stats-estimate',tier:best.tier,lower:lower,upper:upper,rated:0,total:request.players.length,
+            matches:best.matches,minDuration:request.minDuration,maxDuration:request.maxDuration};
+        return out;
+    },function requestLobby(request, raw, get, projectLobby, done) {
+        var info = raw && (raw.match_info || raw), ranks = [], index = 0, seen = {};
+        if (!info || String(info.match_id) !== String(request.matchId) || !info.players || info.players.length !== request.players.length) { done(projectLobby(request,[],[])); return; }
+        function estimate() {
+            var known = projectLobby(request,ranks,null);
+            if (known.lobby.available || request.gameMode !== 1) { done(known); return; }
+            var query = '?game_mode=normal&match_mode=ranked&bucket=avg_badge&min_duration_s=' + request.minDuration +
+                '&max_duration_s=' + request.maxDuration + '&min_unix_timestamp=' + request.from + '&max_unix_timestamp=' + request.to;
+            get('/v1/analytics/hero-stats' + query,function (rows) { done(projectLobby(request,[],rows)); },function () { done(known); });
+        }
+        function next() {
+            if (index >= info.players.length) { estimate(); return; }
+            var player = info.players[index++], id = player.account_id;
+            if (!(id > 0) || seen[id]) { next(); return; }
+            seen[id] = true;
+            get('/v1/players/' + id + '/rank',function (rank) { ranks.push({badge:rank && rank.badge}); next(); },next);
+        }
+        next();
+    });</script></body></html>
